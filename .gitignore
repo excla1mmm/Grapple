@@ -1,0 +1,37 @@
+# Environment
+.env
+.venv/
+venv/
+env/
+CLAUDE.md
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+
+# Data (too large for git)
+data/raw/
+data/processed/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Output (regeneratable)
+output/figures/
+output/tables/
