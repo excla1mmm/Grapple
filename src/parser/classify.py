@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import logging
 import re
-from datetime import UTC, datetime
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +25,14 @@ USES_LINE_PATTERN = re.compile(
 )
 SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{40}$")
 TAG_PATTERN = re.compile(
-    r"^(v?\d+([.-]\d+)*|latest|stable|release[-._]?\d*|v?\d+x)$",
+    r"^("
+    r"v?\d+([.-]\d+)*"  # v1, v1.2, v1.2.3, 1.2.3
+    r"|v?\d+([.-]\d+)*[-._]?(alpha|beta|rc|pre|post|dev)[-._]?\d*"  # v1.0-beta, v2.0-rc.1
+    r"|latest|stable|nightly"  # common aliases
+    r"|release[-._]?\d*"  # release, release-1
+    r"|v?\d+x"  # v1x
+    r"|\d{4}[.-]\d{2}[.-]\d{2}"  # 2024.03.15, 2024-03-15 (calver)
+    r")$",
     re.IGNORECASE,
 )
 BRANCH_HINT_PATTERN = re.compile(
@@ -146,7 +154,7 @@ def classify_uses(uses_value: str) -> dict[str, object]:
             "action_name": uses_value,
             "ref": "",
             "pin_type": "local",
-            "is_pinned": False,
+            "is_pinned": True,  # local actions are safe by definition (same repo)
             "is_high_risk": False,
         }
 
@@ -163,11 +171,13 @@ def classify_uses(uses_value: str) -> dict[str, object]:
     action_name = normalize_action_name(uses_value)
 
     if "@" not in uses_value:
+        # No ref specified = uses default branch (usually main/master)
+        # This is effectively a branch reference and is unpinned
         return {
             "uses_raw": uses_value,
             "action_name": action_name,
             "ref": "",
-            "pin_type": "unknown",
+            "pin_type": "branch",
             "is_pinned": False,
             "is_high_risk": action_name in HIGH_RISK,
         }
@@ -206,13 +216,37 @@ def repo_from_path(workflow_path: Path, input_dir: Path) -> tuple[str, str]:
 
 
 def workflow_last_modified(workflow_path: Path) -> str:
-    modified_at = datetime.fromtimestamp(workflow_path.stat().st_mtime, tz=UTC)
-    return modified_at.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    """Get the last modified time from metadata file if available.
+
+    The fetch.py collector should create .meta.json files with commit timestamps.
+    File mtime is NOT used as it reflects download time, not commit time.
+
+    Expected metadata format:
+    {
+        "last_commit_date": "2026-03-15T10:22:11Z",
+        "sha": "abc123..."
+    }
+    """
+    meta_path = workflow_path.with_suffix(workflow_path.suffix + ".meta.json")
+
+    if not meta_path.exists():
+        # No metadata available - return empty string rather than misleading mtime
+        LOGGER.debug(
+            "No metadata file found for %s, workflow_last_modified will be empty",
+            workflow_path,
+        )
+        return ""
+
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        return meta.get("last_commit_date", "")
+    except (json.JSONDecodeError, OSError) as error:
+        LOGGER.warning("Failed to read metadata for %s: %s", workflow_path, error)
+        return ""
 
 
-def classify_workflows(input_dir: Path) -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
-
+def classify_workflows(input_dir: Path) -> Iterator[dict[str, object]]:
+    """Yield classified uses entries one by one for memory-efficient processing."""
     for workflow_path in workflow_files(input_dir):
         repo, workflow_file = repo_from_path(workflow_path, input_dir)
         workflow_text = workflow_path.read_text(encoding="utf-8", errors="replace")
@@ -224,12 +258,11 @@ def classify_workflows(input_dir: Path) -> list[dict[str, object]]:
             row["repo"] = repo
             row["workflow_file"] = workflow_file
             row["workflow_last_modified"] = last_modified
-            rows.append(row)
-
-    return rows
+            yield row
 
 
-def write_csv(rows: list[dict[str, object]], output_file: Path) -> None:
+def write_csv(rows: Iterator[dict[str, object]], output_file: Path) -> int:
+    """Write rows to CSV in streaming fashion. Returns the number of rows written."""
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
     fieldnames = [
@@ -244,10 +277,15 @@ def write_csv(rows: list[dict[str, object]], output_file: Path) -> None:
         "workflow_last_modified",
     ]
 
+    count = 0
     with output_file.open("w", encoding="utf-8", newline="") as csv_file:
         writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(rows)
+        for row in rows:
+            writer.writerow(row)
+            count += 1
+
+    return count
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -284,9 +322,9 @@ def main() -> None:
     )
 
     rows = classify_workflows(args.input_dir)
-    write_csv(rows, args.output_file)
+    count = write_csv(rows, args.output_file)
 
-    LOGGER.info("Processed %s uses entries", len(rows))
+    LOGGER.info("Processed %d uses entries", count)
     LOGGER.info("Saved results to: %s", args.output_file)
 
 
