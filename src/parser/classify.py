@@ -24,19 +24,26 @@ USES_LINE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{40}$")
+SHORT_SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{7,12}$")
 TAG_PATTERN = re.compile(
     r"^("
     r"v?\d+([.-]\d+)*"  # v1, v1.2, v1.2.3, 1.2.3
     r"|v?\d+([.-]\d+)*[-._]?(alpha|beta|rc|pre|post|dev)[-._]?\d*"  # v1.0-beta, v2.0-rc.1
-    r"|latest|stable|nightly"  # common aliases
+    r"|latest|stable|nightly|beta|alpha|rc|preview|canary|edge|dist|cross"  # common aliases
     r"|release[-._]?\d*"  # release, release-1
     r"|v?\d+x"  # v1x
+    r"|v?\d+[+][a-z0-9._-]+"  # v3+amendpush
     r"|\d{4}[.-]\d{2}[.-]\d{2}"  # 2024.03.15, 2024-03-15 (calver)
     r")$",
     re.IGNORECASE,
 )
 BRANCH_HINT_PATTERN = re.compile(
-    r"^(main|master|develop|development|dev|trunk|next|feature/.+|feat/.+|fix/.+|hotfix/.+|release/.+)$",
+    r"^(main|master|develop|development|devel|dev|trunk|next|head|feature/.+|feat/.+|fix/.+|hotfix/.+|release/.+)$",
+    re.IGNORECASE,
+)
+TAG_SUFFIX_PATTERN = re.compile(r"(?:^|[-_.])v?\d+(?:[.-]\d+)*$", re.IGNORECASE)
+BRANCH_NAME_PATTERN = re.compile(
+    r"^(feature|feat|fix|hotfix|release|support|amd64|arm64|linux|windows|macos|restore)[-_.].+$",
     re.IGNORECASE,
 )
 
@@ -129,6 +136,9 @@ def classify_ref(ref: str) -> str:
     if SHA_PATTERN.fullmatch(normalized_ref):
         return "sha"
 
+    if SHORT_SHA_PATTERN.fullmatch(normalized_ref):
+        return "sha"
+
     if normalized_ref.startswith("refs/heads/"):
         return "branch"
 
@@ -140,6 +150,12 @@ def classify_ref(ref: str) -> str:
 
     if TAG_PATTERN.fullmatch(normalized_ref):
         return "tag"
+
+    if TAG_SUFFIX_PATTERN.search(normalized_ref):
+        return "tag"
+
+    if BRANCH_NAME_PATTERN.fullmatch(normalized_ref):
+        return "branch"
 
     if "/" in normalized_ref:
         return "branch"
