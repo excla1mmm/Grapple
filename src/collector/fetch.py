@@ -149,12 +149,22 @@ def build_search_url(query: str, per_page: int, page: int) -> str:
 
 
 def build_star_range_queries() -> list[str]:
+    """Build search queries split by star ranges.
+
+    GitHub Search API returns max 1000 results per query (10 pages × 100 items).
+    To collect more repositories, we split by star ranges. Each range can yield
+    up to 1000 repos, so more ranges = more coverage.
+    """
     return [
         "archived:false fork:false stars:>50000",
-        "archived:false fork:false stars:10000..50000",
+        "archived:false fork:false stars:20000..50000",
+        "archived:false fork:false stars:10000..19999",
         "archived:false fork:false stars:5000..9999",
-        "archived:false fork:false stars:1000..4999",
-        "archived:false fork:false stars:300..999",
+        "archived:false fork:false stars:2000..4999",
+        "archived:false fork:false stars:1000..1999",
+        "archived:false fork:false stars:500..999",
+        "archived:false fork:false stars:300..499",
+        "archived:false fork:false stars:100..299",
     ]
 
 
@@ -165,6 +175,8 @@ def fetch_repositories(client: GitHubClient, limit: int) -> list[dict[str, Any]]
 
     for query in queries:
         page = 1
+        # GitHub Search API hard limit: max 1000 results (10 pages × 100 items)
+        # See: https://docs.github.com/en/rest/search#about-search
         while len(repositories) < limit and page <= 10:
             per_page = min(limit - len(repositories), 100)
             if per_page <= 0:
@@ -219,6 +231,16 @@ def write_repositories(repositories: list[dict[str, Any]], repos_file: Path) -> 
             handle.write(json.dumps(repository, ensure_ascii=False) + "\n")
 
 
+class WorkflowListError(Exception):
+    """Raised when listing workflows fails due to network issues."""
+
+    def __init__(self, owner: str, repo: str, cause: Exception):
+        self.owner = owner
+        self.repo = repo
+        self.cause = cause
+        super().__init__(f"Failed to list workflows for {owner}/{repo}: {cause}")
+
+
 def list_workflows(
     client: GitHubClient,
     owner: str,
@@ -239,13 +261,7 @@ def list_workflows(
                 return []
             raise
         except (URLError, TimeoutError, socket.timeout) as error:
-            LOGGER.warning(
-                "Failed to list workflows for %s/%s: %s",
-                owner,
-                repo,
-                error,
-            )
-            return workflows
+            raise WorkflowListError(owner, repo, error) from error
 
         page_items = payload.get("workflows", [])
         workflows.extend(page_items)
@@ -311,6 +327,17 @@ def fetch_workflow_metadata(
     return build_workflow_metadata(workflow)
 
 
+def workflow_already_fetched(
+    workflows_dir: Path,
+    owner: str,
+    repo: str,
+    workflow_path: str,
+) -> bool:
+    destination = workflows_dir / owner / repo / Path(workflow_path)
+    meta_path = destination.with_suffix(destination.suffix + ".meta.json")
+    return destination.exists() and meta_path.exists()
+
+
 def write_workflow_file(
     workflows_dir: Path,
     owner: str,
@@ -335,11 +362,17 @@ def fetch_workflows_for_repository(
     client: GitHubClient,
     repository: dict[str, Any],
     workflows_dir: Path,
-) -> int:
+) -> tuple[int, int]:
+    """Fetch workflows for a repository.
+
+    Returns:
+        Tuple of (newly_fetched_count, skipped_existing_count)
+    """
     owner, repo = repository["full_name"].split("/", 1)
     workflows = list_workflows(client, owner, repo)
     default_branch = str(repository.get("default_branch", ""))
-    workflow_count = 0
+    fetched_count = 0
+    skipped_count = 0
 
     for workflow in workflows:
         workflow_path = workflow.get("path", "")
@@ -360,6 +393,16 @@ def fetch_workflows_for_repository(
             )
             continue
 
+        if workflow_already_fetched(workflows_dir, owner, repo, workflow_path):
+            LOGGER.debug(
+                "Skipping %s/%s:%s because it was already fetched",
+                owner,
+                repo,
+                workflow_path,
+            )
+            skipped_count += 1
+            continue
+
         try:
             content = fetch_workflow_content(
                 client,
@@ -377,7 +420,7 @@ def fetch_workflows_for_repository(
                 content,
                 metadata,
             )
-            workflow_count += 1
+            fetched_count += 1
         except HTTPError as error:
             if error.code == 404:
                 LOGGER.info(
@@ -403,7 +446,7 @@ def fetch_workflows_for_repository(
                 error,
             )
 
-    return workflow_count
+    return fetched_count, skipped_count
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -442,6 +485,20 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def load_existing_repositories(repos_file: Path) -> list[dict[str, Any]]:
+    """Load existing repositories from repos.jsonl if it exists."""
+    if not repos_file.exists():
+        return []
+
+    repositories: list[dict[str, Any]] = []
+    with repos_file.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if line:
+                repositories.append(json.loads(line))
+    return repositories
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -454,11 +511,21 @@ def main() -> None:
     token = resolve_github_token(args.env_file)
     client = GitHubClient(token=token)
 
-    repositories = fetch_repositories(client, args.limit)
-    write_repositories(repositories, args.repos_file)
-    LOGGER.info("Saved %s repositories to %s", len(repositories), args.repos_file)
+    existing_repos = load_existing_repositories(args.repos_file)
+    if existing_repos:
+        LOGGER.info(
+            "Found %s existing repositories in %s, resuming...",
+            len(existing_repos),
+            args.repos_file,
+        )
+        repositories = existing_repos
+    else:
+        repositories = fetch_repositories(client, args.limit)
+        write_repositories(repositories, args.repos_file)
+        LOGGER.info("Saved %s repositories to %s", len(repositories), args.repos_file)
 
-    total_workflows = 0
+    total_fetched = 0
+    total_skipped = 0
     for index, repository in enumerate(repositories, start=1):
         LOGGER.info(
             "[%s/%s] Fetching workflows for %s",
@@ -467,12 +534,12 @@ def main() -> None:
             repository["full_name"],
         )
         try:
-            workflows_found = fetch_workflows_for_repository(
+            fetched, skipped = fetch_workflows_for_repository(
                 client,
                 repository,
                 args.workflows_dir,
             )
-        except (HTTPError, URLError, TimeoutError, socket.timeout) as error:
+        except (HTTPError, URLError, TimeoutError, socket.timeout, WorkflowListError) as error:
             LOGGER.warning(
                 "[%s/%s] Skipping %s because repository fetch failed: %s",
                 index,
@@ -481,16 +548,23 @@ def main() -> None:
                 error,
             )
             continue
-        total_workflows += workflows_found
-        LOGGER.info(
-            "[%s/%s] Saved %s workflow files for %s",
-            index,
-            len(repositories),
-            workflows_found,
-            repository["full_name"],
-        )
+        total_fetched += fetched
+        total_skipped += skipped
+        if fetched > 0 or skipped > 0:
+            LOGGER.info(
+                "[%s/%s] %s: fetched %s new, skipped %s existing",
+                index,
+                len(repositories),
+                repository["full_name"],
+                fetched,
+                skipped,
+            )
 
-    LOGGER.info("Finished pilot fetch. Total workflow files saved: %s", total_workflows)
+    LOGGER.info(
+        "Finished fetch. New workflows: %s, Skipped existing: %s",
+        total_fetched,
+        total_skipped,
+    )
 
 
 if __name__ == "__main__":

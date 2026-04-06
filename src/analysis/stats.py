@@ -102,6 +102,12 @@ def top_unpinned_actions(
     actions: list[dict[str, str]],
     limit: int,
 ) -> list[dict[str, str]]:
+    # Build index once: O(n) instead of O(n * limit)
+    action_samples: dict[str, dict[str, str]] = {}
+    for row in actions:
+        if row["action_name"] not in action_samples:
+            action_samples[row["action_name"]] = row
+
     counts = Counter(
         row["action_name"]
         for row in actions
@@ -110,7 +116,7 @@ def top_unpinned_actions(
 
     rows: list[dict[str, str]] = []
     for action_name, count in counts.most_common(limit):
-        sample_row = next(row for row in actions if row["action_name"] == action_name)
+        sample_row = action_samples[action_name]  # O(1) lookup
         rows.append(
             {
                 "action_name": action_name,

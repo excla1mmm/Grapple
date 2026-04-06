@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(mkdir -p:*)"
+      "Bash(mkdir -p:*)",
+      "Bash(cat:*)",
+      "Bash(git -C \"D:/Grapple\" diff --stat)"
     ]
   }
 }

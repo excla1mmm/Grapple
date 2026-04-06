@@ -24,7 +24,6 @@ USES_LINE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{40}$")
-SHORT_SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{7,12}$")
 TAG_PATTERN = re.compile(
     r"^("
     r"v?\d+([.-]\d+)*"  # v1, v1.2, v1.2.3, 1.2.3
@@ -134,9 +133,6 @@ def classify_ref(ref: str) -> str:
     normalized_ref = ref.strip()
 
     if SHA_PATTERN.fullmatch(normalized_ref):
-        return "sha"
-
-    if SHORT_SHA_PATTERN.fullmatch(normalized_ref):
         return "sha"
 
     if normalized_ref.startswith("refs/heads/"):
