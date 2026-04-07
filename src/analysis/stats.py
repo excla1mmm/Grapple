@@ -143,6 +143,143 @@ def high_risk_unpinned_actions(actions: list[dict[str, str]]) -> list[dict[str, 
     )
 
 
+def actions_popularity(actions: list[dict[str, str]]) -> list[dict[str, str]]:
+    grouped: dict[str, list[dict[str, str]]] = {}
+
+    for row in actions:
+        action_name = row["action_name"]
+        grouped.setdefault(action_name, []).append(row)
+
+    rows: list[dict[str, str]] = []
+    for action_name, group_rows in grouped.items():
+        total_uses = len(group_rows)
+        unique_repos = len({row["repo"] for row in group_rows})
+        pinned_uses = sum(1 for row in group_rows if is_true(row["is_pinned"]))
+        unpinned_uses = sum(1 for row in group_rows if not is_true(row["is_pinned"]))
+        tag_uses = sum(1 for row in group_rows if row["pin_type"] == "tag")
+        branch_uses = sum(1 for row in group_rows if row["pin_type"] == "branch")
+        sha_uses = sum(1 for row in group_rows if row["pin_type"] == "sha")
+        local_uses = sum(1 for row in group_rows if row["pin_type"] == "local")
+        docker_uses = sum(1 for row in group_rows if row["pin_type"] == "docker")
+        unknown_uses = sum(1 for row in group_rows if row["pin_type"] == "unknown")
+        is_high_risk = any(is_true(row["is_high_risk"]) for row in group_rows)
+
+        rows.append(
+            {
+                "action_name": action_name,
+                "total_uses": str(total_uses),
+                "unique_repos": str(unique_repos),
+                "pinned_uses": str(pinned_uses),
+                "unpinned_uses": str(unpinned_uses),
+                "pinned_rate": percentage(pinned_uses, total_uses),
+                "tag_uses": str(tag_uses),
+                "branch_uses": str(branch_uses),
+                "sha_uses": str(sha_uses),
+                "local_uses": str(local_uses),
+                "docker_uses": str(docker_uses),
+                "unknown_uses": str(unknown_uses),
+                "is_high_risk": str(is_high_risk),
+            }
+        )
+
+    return sorted(
+        rows,
+        key=lambda row: (-int(row["total_uses"]), row["action_name"]),
+    )
+
+
+def clamp_score(score: int) -> int:
+    return max(0, min(score, 100))
+
+
+def risk_level(score: int) -> str:
+    if score >= 70:
+        return "high"
+    if score >= 35:
+        return "medium"
+    return "low"
+
+
+def repo_risk(actions: list[dict[str, str]]) -> list[dict[str, str]]:
+    grouped: dict[str, list[dict[str, str]]] = {}
+
+    for row in actions:
+        repo = row["repo"]
+        grouped.setdefault(repo, []).append(row)
+
+    rows: list[dict[str, str]] = []
+    for repo, group_rows in grouped.items():
+        total_uses = len(group_rows)
+        external_rows = [
+            row for row in group_rows if row["pin_type"] not in {"local", "docker"}
+        ]
+        external_uses = len(external_rows)
+        pinned_uses = sum(1 for row in external_rows if is_true(row["is_pinned"]))
+        unpinned_uses = sum(1 for row in external_rows if not is_true(row["is_pinned"]))
+        branch_uses = sum(1 for row in external_rows if row["pin_type"] == "branch")
+        tag_uses = sum(1 for row in external_rows if row["pin_type"] == "tag")
+        sha_uses = sum(1 for row in external_rows if row["pin_type"] == "sha")
+        unknown_uses = sum(1 for row in external_rows if row["pin_type"] == "unknown")
+        high_risk_uses = sum(1 for row in external_rows if is_true(row["is_high_risk"]))
+        local_uses = sum(1 for row in group_rows if row["pin_type"] == "local")
+        docker_uses = sum(1 for row in group_rows if row["pin_type"] == "docker")
+
+        has_unpinned = unpinned_uses > 0
+        has_high_risk = high_risk_uses > 0
+        unpinned_rate_value = (unpinned_uses / external_uses) if external_uses else 0.0
+
+        score = 0
+        if has_unpinned:
+            score += 20
+        if unpinned_rate_value >= 0.5:
+            score += 15
+        if unpinned_rate_value >= 0.8:
+            score += 15
+        if branch_uses > 0:
+            score += 20
+        if branch_uses >= 3:
+            score += 10
+        if has_high_risk:
+            score += 30
+        if high_risk_uses >= 3:
+            score += 10
+        if external_uses >= 20:
+            score += 5
+        if external_uses >= 50:
+            score += 5
+        if external_uses > 0 and (pinned_uses / external_uses) >= 0.8:
+            score -= 10
+
+        final_score = clamp_score(score)
+
+        rows.append(
+            {
+                "repo": repo,
+                "total_uses": str(total_uses),
+                "external_uses": str(external_uses),
+                "pinned_uses": str(pinned_uses),
+                "unpinned_uses": str(unpinned_uses),
+                "unpinned_rate": percentage(unpinned_uses, external_uses),
+                "branch_uses": str(branch_uses),
+                "tag_uses": str(tag_uses),
+                "sha_uses": str(sha_uses),
+                "unknown_uses": str(unknown_uses),
+                "local_uses": str(local_uses),
+                "docker_uses": str(docker_uses),
+                "high_risk_uses": str(high_risk_uses),
+                "has_unpinned": str(has_unpinned),
+                "has_high_risk": str(has_high_risk),
+                "repo_risk_score": str(final_score),
+                "repo_risk_level": risk_level(final_score),
+            }
+        )
+
+    return sorted(
+        rows,
+        key=lambda row: (-int(row["repo_risk_score"]), -int(row["unpinned_uses"]), row["repo"]),
+    )
+
+
 def write_csv(rows: list[dict[str, str]], output_file: Path) -> None:
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -204,10 +341,14 @@ def main() -> None:
     summary_rows = summarize(actions, repositories)
     top_rows = top_unpinned_actions(actions, args.top_limit)
     high_risk_rows = high_risk_unpinned_actions(actions)
+    popularity_rows = actions_popularity(actions)
+    repo_risk_rows = repo_risk(actions)
 
     write_csv(summary_rows, args.output_dir / "table1_summary.csv")
     write_csv(top_rows, args.output_dir / "table2_top_unpinned_actions.csv")
     write_csv(high_risk_rows, args.output_dir / "table3_high_risk_unpinned.csv")
+    write_csv(popularity_rows, args.output_dir / "table4_actions_popularity.csv")
+    write_csv(repo_risk_rows, args.output_dir / "table5_repo_risk.csv")
 
     print_summary(summary_rows)
     print(f"Saved summary tables to: {args.output_dir}")
