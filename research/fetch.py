@@ -15,10 +15,10 @@ from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
-DEFAULT_REPOS_FILE = ROOT_DIR / "data" / "raw" / "repos.jsonl"
-DEFAULT_WORKFLOWS_DIR = ROOT_DIR / "data" / "raw" / "workflows"
-DEFAULT_ENV_FILE = ROOT_DIR / ".env"
+RESEARCH_DIR = Path(__file__).resolve().parent
+DEFAULT_REPOS_FILE = RESEARCH_DIR / "data" / "raw" / "repos.jsonl"
+DEFAULT_WORKFLOWS_DIR = RESEARCH_DIR / "data" / "raw" / "workflows"
+DEFAULT_ENV_FILE = RESEARCH_DIR.parent / ".env"
 
 GITHUB_API_BASE = "https://api.github.com"
 SEARCH_REPOS_ENDPOINT = f"{GITHUB_API_BASE}/search/repositories"

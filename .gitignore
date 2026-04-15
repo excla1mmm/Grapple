@@ -16,8 +16,8 @@ dist/
 *.egg-info/
 
 # Data (too large for git)
-data/raw/
-data/processed/
+research/data/raw/
+research/data/processed/
 
 # IDE
 .idea/
@@ -33,5 +33,5 @@ data/processed/
 Thumbs.db
 
 # Output (regeneratable)
-output/figures/
-output/tables/
+research/output/figures/
+research/output/tables/

@@ -15,9 +15,9 @@ except ImportError:  # pragma: no cover - optional dependency until requirements
     yaml = None
 
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
-DEFAULT_INPUT_DIR = ROOT_DIR / "data" / "raw" / "workflows"
-DEFAULT_OUTPUT_FILE = ROOT_DIR / "data" / "processed" / "actions.csv"
+ROOT_DIR = Path(__file__).resolve().parents[1]
+DEFAULT_INPUT_DIR = ROOT_DIR / "research" / "data" / "raw" / "workflows"
+DEFAULT_OUTPUT_FILE = ROOT_DIR / "research" / "data" / "processed" / "actions.csv"
 
 USES_LINE_PATTERN = re.compile(
     r"^\s*-?\s*uses:\s*[\"']?(?P<value>[^\"'#\r\n]+?)[\"']?\s*(?:#.*)?$",
@@ -230,7 +230,7 @@ def repo_from_path(workflow_path: Path, input_dir: Path) -> tuple[str, str]:
 def workflow_last_modified(workflow_path: Path) -> str:
     """Get the last modified time from metadata file if available.
 
-    The fetch.py collector should create .meta.json files with commit timestamps.
+    The research/fetch.py collector creates .meta.json files with commit timestamps.
     File mtime is NOT used as it reflects download time, not commit time.
 
     Expected metadata format:

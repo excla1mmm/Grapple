@@ -7,10 +7,10 @@ from collections import Counter
 from pathlib import Path
 
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
-DEFAULT_ACTIONS_FILE = ROOT_DIR / "data" / "processed" / "actions.csv"
-DEFAULT_REPOS_FILE = ROOT_DIR / "data" / "raw" / "repos.jsonl"
-DEFAULT_OUTPUT_DIR = ROOT_DIR / "output" / "tables"
+RESEARCH_DIR = Path(__file__).resolve().parent
+DEFAULT_ACTIONS_FILE = RESEARCH_DIR / "data" / "processed" / "actions.csv"
+DEFAULT_REPOS_FILE = RESEARCH_DIR / "data" / "raw" / "repos.jsonl"
+DEFAULT_OUTPUT_DIR = RESEARCH_DIR / "output" / "tables"
 
 
 def load_actions(actions_file: Path) -> list[dict[str, str]]:
@@ -308,13 +308,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--actions-file",
         type=Path,
         default=DEFAULT_ACTIONS_FILE,
-        help="Path to actions.csv produced by src.parser.classify.",
+        help="Path to actions.csv produced by core.classify.",
     )
     parser.add_argument(
         "--repos-file",
         type=Path,
         default=DEFAULT_REPOS_FILE,
-        help="Path to repos.jsonl produced by src.collector.fetch.",
+        help="Path to repos.jsonl produced by research.fetch.",
     )
     parser.add_argument(
         "--output-dir",
