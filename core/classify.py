@@ -18,6 +18,7 @@ except ImportError:  # pragma: no cover - optional dependency until requirements
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_INPUT_DIR = ROOT_DIR / "research" / "data" / "raw" / "workflows"
 DEFAULT_OUTPUT_FILE = ROOT_DIR / "research" / "data" / "processed" / "actions.csv"
+INCIDENTS_FILE = ROOT_DIR / "incidents" / "database.yml"
 
 USES_LINE_PATTERN = re.compile(
     r"^\s*-?\s*uses:\s*[\"']?(?P<value>[^\"'#\r\n]+?)[\"']?\s*(?:#.*)?$",
@@ -46,15 +47,43 @@ BRANCH_NAME_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-HIGH_RISK = {
-    "aquasecurity/trivy-action",
-    "tj-actions/changed-files",
-    "reviewdog/action-misspell",
-    "reviewdog/action-actionlint",
-    "step-security/harden-runner",
-}
-
 LOGGER = logging.getLogger(__name__)
+
+
+def load_high_risk_actions(incidents_file: Path) -> frozenset[str]:
+    """Load the set of high-risk action names from incidents/database.yml.
+
+    Falls back to an empty set if the submodule is not initialized.
+    Run `git submodule update --init --remote` to initialize it.
+    """
+    if not incidents_file.exists():
+        LOGGER.warning(
+            "Incidents database not found at %s. "
+            "Run: git submodule update --init --remote",
+            incidents_file,
+        )
+        return frozenset()
+
+    if yaml is None:
+        LOGGER.warning("PyYAML not installed — cannot load incidents database")
+        return frozenset()
+
+    try:
+        with incidents_file.open("r", encoding="utf-8") as handle:
+            entries = yaml.safe_load(handle)
+        if not isinstance(entries, list):
+            return frozenset()
+        return frozenset(
+            entry["action"]
+            for entry in entries
+            if isinstance(entry, dict) and "action" in entry
+        )
+    except Exception as error:
+        LOGGER.warning("Failed to load incidents database: %s", error)
+        return frozenset()
+
+
+HIGH_RISK: frozenset[str] = load_high_risk_actions(INCIDENTS_FILE)
 
 
 def fallback_extract_uses_lines(workflow_text: str) -> list[str]:
