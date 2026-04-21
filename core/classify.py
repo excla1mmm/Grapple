@@ -8,6 +8,8 @@ import re
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import urlopen
 
 try:
     import yaml
@@ -18,7 +20,10 @@ except ImportError:  # pragma: no cover - optional dependency until requirements
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_INPUT_DIR = ROOT_DIR / "research" / "data" / "raw" / "workflows"
 DEFAULT_OUTPUT_FILE = ROOT_DIR / "research" / "data" / "processed" / "actions.csv"
-INCIDENTS_FILE = ROOT_DIR / "incidents" / "database.yml"
+DEFAULT_INCIDENTS_URL = (
+    "https://raw.githubusercontent.com/excla1mmm/Grapple-db/main/database.yml"
+)
+INCIDENTS_FETCH_TIMEOUT_SECONDS = 30
 
 USES_LINE_PATTERN = re.compile(
     r"^\s*-?\s*uses:\s*[\"']?(?P<value>[^\"'#\r\n]+?)[\"']?\s*(?:#.*)?$",
@@ -48,42 +53,35 @@ BRANCH_NAME_PATTERN = re.compile(
 )
 
 LOGGER = logging.getLogger(__name__)
+HIGH_RISK: frozenset[str] = frozenset()
 
 
-def load_high_risk_actions(incidents_file: Path) -> frozenset[str]:
-    """Load the set of high-risk action names from incidents/database.yml.
-
-    Falls back to an empty set if the submodule is not initialized.
-    Run `git submodule update --init --remote` to initialize it.
-    """
-    if not incidents_file.exists():
-        LOGGER.warning(
-            "Incidents database not found at %s. "
-            "Run: git submodule update --init --remote",
-            incidents_file,
-        )
-        return frozenset()
-
+def fetch_high_risk_actions(incidents_url: str) -> frozenset[str]:
+    """Load high-risk action names from the remote incidents database."""
     if yaml is None:
-        LOGGER.warning("PyYAML not installed — cannot load incidents database")
-        return frozenset()
+        raise RuntimeError("PyYAML is required to load the incidents database")
 
     try:
-        with incidents_file.open("r", encoding="utf-8") as handle:
-            entries = yaml.safe_load(handle)
-        if not isinstance(entries, list):
-            return frozenset()
-        return frozenset(
-            entry["action"]
-            for entry in entries
-            if isinstance(entry, dict) and "action" in entry
-        )
-    except Exception as error:
-        LOGGER.warning("Failed to load incidents database: %s", error)
-        return frozenset()
+        with urlopen(incidents_url, timeout=INCIDENTS_FETCH_TIMEOUT_SECONDS) as response:
+            incidents_text = response.read().decode("utf-8")
+    except (HTTPError, URLError, TimeoutError, OSError) as error:
+        raise RuntimeError(
+            f"Failed to fetch incidents database from {incidents_url}: {error}"
+        ) from error
 
+    try:
+        entries = yaml.safe_load(incidents_text)
+    except yaml.YAMLError as error:
+        raise RuntimeError(f"Failed to parse incidents database: {error}") from error
 
-HIGH_RISK: frozenset[str] = load_high_risk_actions(INCIDENTS_FILE)
+    if not isinstance(entries, list):
+        raise RuntimeError("Incidents database must be a YAML list")
+
+    return frozenset(
+        entry["action"]
+        for entry in entries
+        if isinstance(entry, dict) and "action" in entry
+    )
 
 
 def fallback_extract_uses_lines(workflow_text: str) -> list[str]:
@@ -188,7 +186,13 @@ def classify_ref(ref: str) -> str:
     return "unknown"
 
 
-def classify_uses(uses_value: str) -> dict[str, object]:
+def classify_uses(
+    uses_value: str,
+    high_risk_actions: frozenset[str] | None = None,
+) -> dict[str, object]:
+    if high_risk_actions is None:
+        high_risk_actions = HIGH_RISK
+
     if uses_value.startswith("./"):
         return {
             "uses_raw": uses_value,
@@ -212,15 +216,14 @@ def classify_uses(uses_value: str) -> dict[str, object]:
     action_name = normalize_action_name(uses_value)
 
     if "@" not in uses_value:
-        # No ref specified = uses default branch (usually main/master)
-        # This is effectively a branch reference and is unpinned
+        # No ref specified = uses default branch (usually main/master).
         return {
             "uses_raw": uses_value,
             "action_name": action_name,
             "ref": "",
             "pin_type": "branch",
             "is_pinned": False,
-            "is_high_risk": action_name in HIGH_RISK,
+            "is_high_risk": action_name in high_risk_actions,
         }
 
     _, ref = uses_value.rsplit("@", 1)
@@ -232,7 +235,7 @@ def classify_uses(uses_value: str) -> dict[str, object]:
         "ref": ref,
         "pin_type": pin_type,
         "is_pinned": pin_type == "sha",
-        "is_high_risk": action_name in HIGH_RISK,
+        "is_high_risk": action_name in high_risk_actions,
     }
 
 
@@ -271,7 +274,6 @@ def workflow_last_modified(workflow_path: Path) -> str:
     meta_path = workflow_path.with_suffix(workflow_path.suffix + ".meta.json")
 
     if not meta_path.exists():
-        # No metadata available - return empty string rather than misleading mtime
         LOGGER.debug(
             "No metadata file found for %s, workflow_last_modified will be empty",
             workflow_path,
@@ -286,7 +288,10 @@ def workflow_last_modified(workflow_path: Path) -> str:
         return ""
 
 
-def classify_workflows(input_dir: Path) -> Iterator[dict[str, object]]:
+def classify_workflows(
+    input_dir: Path,
+    high_risk_actions: frozenset[str] | None = None,
+) -> Iterator[dict[str, object]]:
     """Yield classified uses entries one by one for memory-efficient processing."""
     for workflow_path in workflow_files(input_dir):
         repo, workflow_file = repo_from_path(workflow_path, input_dir)
@@ -295,7 +300,7 @@ def classify_workflows(input_dir: Path) -> Iterator[dict[str, object]]:
         last_modified = workflow_last_modified(workflow_path)
 
         for uses_value in uses_values:
-            row = classify_uses(uses_value)
+            row = classify_uses(uses_value, high_risk_actions)
             row["repo"] = repo
             row["workflow_file"] = workflow_file
             row["workflow_last_modified"] = last_modified
@@ -346,6 +351,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="CSV file where classification results will be written.",
     )
     parser.add_argument(
+        "--incidents-url",
+        default=DEFAULT_INCIDENTS_URL,
+        help="Raw GitHub URL for the incidents database YAML file.",
+    )
+    parser.add_argument(
         "--log-level",
         default="INFO",
         help="Logging level: DEBUG, INFO, WARNING, ERROR.",
@@ -362,7 +372,14 @@ def main() -> None:
         format="%(levelname)s: %(message)s",
     )
 
-    rows = classify_workflows(args.input_dir)
+    high_risk_actions = fetch_high_risk_actions(args.incidents_url)
+    LOGGER.info(
+        "Loaded %d high-risk actions from %s",
+        len(high_risk_actions),
+        args.incidents_url,
+    )
+
+    rows = classify_workflows(args.input_dir, high_risk_actions)
     count = write_csv(rows, args.output_file)
 
     LOGGER.info("Processed %d uses entries", count)
