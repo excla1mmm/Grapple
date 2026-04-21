@@ -155,7 +155,7 @@ def build_star_range_queries() -> list[str]:
     To collect more repositories, we split by star ranges. Each range can yield
     up to 1000 repos, so more ranges = more coverage.
     """
-    return [
+    queries = [
         "archived:false fork:false stars:>50000",
         "archived:false fork:false stars:20000..50000",
         "archived:false fork:false stars:10000..19999",
@@ -164,8 +164,15 @@ def build_star_range_queries() -> list[str]:
         "archived:false fork:false stars:1000..1999",
         "archived:false fork:false stars:500..999",
         "archived:false fork:false stars:300..499",
-        "archived:false fork:false stars:100..299",
     ]
+
+    # Split the dense 100..299 segment into smaller buckets so each query is
+    # less likely to hit the Search API's 1000-result cap.
+    for start in range(100, 300, 50):
+        end = start + 49
+        queries.append(f"archived:false fork:false stars:{start}..{end}")
+
+    return queries
 
 
 def fetch_repositories(client: GitHubClient, limit: int) -> list[dict[str, Any]]:
