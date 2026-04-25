@@ -20,6 +20,7 @@ except ImportError:  # pragma: no cover - optional dependency until requirements
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_INPUT_DIR = ROOT_DIR / "research" / "data" / "raw" / "workflows"
 DEFAULT_OUTPUT_FILE = ROOT_DIR / "research" / "data" / "processed" / "actions.csv"
+INCIDENTS_FILE = ROOT_DIR / "incidents" / "database.yml"
 DEFAULT_INCIDENTS_URL = (
     "https://raw.githubusercontent.com/excla1mmm/Grapple-db/main/database.yml"
 )
@@ -53,21 +54,11 @@ BRANCH_NAME_PATTERN = re.compile(
 )
 
 LOGGER = logging.getLogger(__name__)
-HIGH_RISK: frozenset[str] = frozenset()
 
 
-def fetch_high_risk_actions(incidents_url: str) -> frozenset[str]:
-    """Load high-risk action names from the remote incidents database."""
+def _parse_incidents_yaml(incidents_text: str) -> frozenset[str]:
     if yaml is None:
         raise RuntimeError("PyYAML is required to load the incidents database")
-
-    try:
-        with urlopen(incidents_url, timeout=INCIDENTS_FETCH_TIMEOUT_SECONDS) as response:
-            incidents_text = response.read().decode("utf-8")
-    except (HTTPError, URLError, TimeoutError, OSError) as error:
-        raise RuntimeError(
-            f"Failed to fetch incidents database from {incidents_url}: {error}"
-        ) from error
 
     try:
         entries = yaml.safe_load(incidents_text)
@@ -82,6 +73,51 @@ def fetch_high_risk_actions(incidents_url: str) -> frozenset[str]:
         for entry in entries
         if isinstance(entry, dict) and "action" in entry
     )
+
+
+def load_high_risk_actions(incidents_file: Path) -> frozenset[str]:
+    """Load high-risk action names from a local incidents YAML file.
+
+    Canonical source per CLAUDE.md: the `incidents/` git submodule.
+    Raises FileNotFoundError if the submodule is not initialized
+    (run: `git submodule update --init --remote`).
+    """
+    if not incidents_file.exists():
+        raise FileNotFoundError(
+            f"Incidents database not found at {incidents_file}. "
+            "Run: git submodule update --init --remote"
+        )
+    return _parse_incidents_yaml(incidents_file.read_text(encoding="utf-8"))
+
+
+def fetch_high_risk_actions(incidents_url: str) -> frozenset[str]:
+    """Load high-risk action names from the remote incidents database (HTTP fallback)."""
+    try:
+        with urlopen(incidents_url, timeout=INCIDENTS_FETCH_TIMEOUT_SECONDS) as response:
+            incidents_text = response.read().decode("utf-8")
+    except (HTTPError, URLError, TimeoutError, OSError) as error:
+        raise RuntimeError(
+            f"Failed to fetch incidents database from {incidents_url}: {error}"
+        ) from error
+
+    return _parse_incidents_yaml(incidents_text)
+
+
+def get_high_risk_actions(
+    incidents_file: Path = INCIDENTS_FILE,
+    incidents_url: str = DEFAULT_INCIDENTS_URL,
+) -> frozenset[str]:
+    """Load high-risk actions from the submodule, falling back to HTTP if missing.
+
+    The submodule is the canonical source. HTTP is used only when the submodule
+    is not initialized — a malformed local file raises rather than silently
+    falling back, since that indicates a broken local checkout.
+    """
+    try:
+        return load_high_risk_actions(incidents_file)
+    except FileNotFoundError as error:
+        LOGGER.warning("%s — falling back to %s", error, incidents_url)
+        return fetch_high_risk_actions(incidents_url)
 
 
 def fallback_extract_uses_lines(workflow_text: str) -> list[str]:
@@ -188,11 +224,8 @@ def classify_ref(ref: str) -> str:
 
 def classify_uses(
     uses_value: str,
-    high_risk_actions: frozenset[str] | None = None,
+    high_risk_actions: frozenset[str],
 ) -> dict[str, object]:
-    if high_risk_actions is None:
-        high_risk_actions = HIGH_RISK
-
     if uses_value.startswith("./"):
         return {
             "uses_raw": uses_value,
@@ -290,7 +323,7 @@ def workflow_last_modified(workflow_path: Path) -> str:
 
 def classify_workflows(
     input_dir: Path,
-    high_risk_actions: frozenset[str] | None = None,
+    high_risk_actions: frozenset[str],
 ) -> Iterator[dict[str, object]]:
     """Yield classified uses entries one by one for memory-efficient processing."""
     for workflow_path in workflow_files(input_dir):
@@ -351,9 +384,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="CSV file where classification results will be written.",
     )
     parser.add_argument(
+        "--incidents-file",
+        type=Path,
+        default=INCIDENTS_FILE,
+        help="Path to the local incidents database YAML (canonical, from git submodule).",
+    )
+    parser.add_argument(
         "--incidents-url",
         default=DEFAULT_INCIDENTS_URL,
-        help="Raw GitHub URL for the incidents database YAML file.",
+        help="Raw GitHub URL used as fallback if --incidents-file is missing.",
     )
     parser.add_argument(
         "--log-level",
@@ -372,12 +411,11 @@ def main() -> None:
         format="%(levelname)s: %(message)s",
     )
 
-    high_risk_actions = fetch_high_risk_actions(args.incidents_url)
-    LOGGER.info(
-        "Loaded %d high-risk actions from %s",
-        len(high_risk_actions),
-        args.incidents_url,
+    high_risk_actions = get_high_risk_actions(
+        incidents_file=args.incidents_file,
+        incidents_url=args.incidents_url,
     )
+    LOGGER.info("Loaded %d high-risk actions", len(high_risk_actions))
 
     rows = classify_workflows(args.input_dir, high_risk_actions)
     count = write_csv(rows, args.output_file)
