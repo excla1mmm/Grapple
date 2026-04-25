@@ -5,6 +5,9 @@ venv/
 env/
 CLAUDE.md
 
+# GitHub App private keys
+*.pem
+
 # Python
 __pycache__/
 *.py[cod]

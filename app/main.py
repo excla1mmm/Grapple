@@ -6,15 +6,18 @@ Run locally: uvicorn app.main:app --reload --port 8000
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from base64 import b64decode
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from app.analyzer import Finding, analyze_workflow
+from app.check_run import conclusion_for, summary_for, title_for
 from app.github import GitHubAppClient
 from core.classify import get_high_risk_actions
 
@@ -59,6 +62,7 @@ async def health() -> dict[str, str]:
 @app.post("/webhook")
 async def webhook(
     request: Request,
+    background_tasks: BackgroundTasks,
     x_hub_signature_256: str | None = Header(None),
     x_github_event: str | None = Header(None),
     x_github_delivery: str | None = Header(None),
@@ -76,5 +80,101 @@ async def webhook(
         len(body),
     )
 
-    # TODO(phase-2): dispatch push/pull_request → analyzer → check run / SARIF
+    if x_github_event in ("push", "pull_request"):
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Malformed JSON payload")
+        background_tasks.add_task(
+            process_event,
+            client,
+            request.app.state.high_risk_actions,
+            x_github_event,
+            payload,
+        )
+
     return JSONResponse({"accepted": True}, status_code=202)
+
+
+def extract_event_target(
+    event: str, payload: dict
+) -> tuple[str, str, str, str, int] | None:
+    """Return (owner, repo, ref, head_sha, installation_id) or None if not actionable."""
+    installation_id = (payload.get("installation") or {}).get("id")
+    if not installation_id:
+        return None
+
+    full_name = (payload.get("repository") or {}).get("full_name") or ""
+    if "/" not in full_name:
+        return None
+    owner, name = full_name.split("/", 1)
+
+    if event == "push":
+        head_sha = payload.get("after") or ""
+        ref = payload.get("ref") or ""
+        ref_name = ref.removeprefix("refs/heads/") if ref.startswith("refs/heads/") else ref
+    elif event == "pull_request":
+        if payload.get("action") not in ("opened", "synchronize", "reopened"):
+            return None
+        head = (payload.get("pull_request") or {}).get("head") or {}
+        head_sha = head.get("sha") or ""
+        ref_name = head.get("ref") or ""
+    else:
+        return None
+
+    if not (head_sha and ref_name):
+        return None
+    return owner, name, ref_name, head_sha, installation_id
+
+
+async def process_event(
+    client: GitHubAppClient,
+    high_risk_actions: frozenset[str],
+    event: str,
+    payload: dict,
+) -> None:
+    """Fetch workflows for the event, analyze, and post a Check Run.
+
+    Runs as a FastAPI BackgroundTask after the webhook has been acked.
+    Errors are logged, never raised — webhook delivery has already succeeded.
+    """
+    target = extract_event_target(event, payload)
+    if target is None:
+        LOGGER.info("Skipping %s event — not actionable", event)
+        return
+    owner, repo, ref, head_sha, installation_id = target
+    LOGGER.info("Analyzing %s/%s @ %s (event=%s)", owner, repo, head_sha[:8], event)
+
+    try:
+        token = await client.get_installation_token(installation_id)
+        files = await client.get_workflow_files(owner, repo, ref, token)
+    except Exception:
+        LOGGER.exception("Failed to fetch workflows for %s/%s", owner, repo)
+        return
+
+    findings: list[Finding] = []
+    for f in files:
+        findings.extend(analyze_workflow(f["content"], f["path"], high_risk_actions))
+
+    try:
+        check_run_id = await client.create_check_run(
+            owner=owner,
+            repo=repo,
+            head_sha=head_sha,
+            token=token,
+            title=title_for(findings),
+            summary=summary_for(findings),
+            conclusion=conclusion_for(findings),
+        )
+    except Exception:
+        LOGGER.exception("Failed to create check run for %s/%s", owner, repo)
+        return
+
+    LOGGER.info(
+        "Check run %d created for %s/%s (%d findings, %s)",
+        check_run_id,
+        owner,
+        repo,
+        len(findings),
+        conclusion_for(findings),
+    )
