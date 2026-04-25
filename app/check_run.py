@@ -45,6 +45,16 @@ def title_for(findings: list[Finding]) -> str:
     return "All actions look safe"
 
 
+def _render_finding(f: Finding) -> str:
+    """Render a single finding as a markdown bullet, varying by kind."""
+    if f.kind in ("action", "reusable_workflow"):
+        ref = f.ref or "default"
+        return f"- `{f.action_name}@{ref}` in `{f.workflow_file}` — {f.message}"
+    # permission / runner findings: action_name already names the thing,
+    # avoid the awkward `permissions.id-token@write` prefix.
+    return f"- In `{f.workflow_file}`: {f.message}"
+
+
 def summary_for(findings: list[Finding]) -> str:
     if not findings:
         return "No `uses:` references found in `.github/workflows/`."
@@ -61,9 +71,6 @@ def summary_for(findings: list[Finding]) -> str:
         emoji = _SEVERITY_EMOJI.get(severity, "")
         lines.append(f"### {emoji} {severity.upper()} ({len(items)})")
         for f in items:
-            ref = f.ref or "default"
-            lines.append(
-                f"- `{f.action_name}@{ref}` in `{f.workflow_file}` — {f.message}"
-            )
+            lines.append(_render_finding(f))
         lines.append("")
     return "\n".join(lines).rstrip()
