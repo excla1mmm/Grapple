@@ -273,9 +273,7 @@ def classify_uses(
 
 
 def workflow_files(input_dir: Path) -> list[Path]:
-    files = list(input_dir.rglob("*.yml"))
-    files.extend(input_dir.rglob("*.yaml"))
-    return sorted(files)
+    return sorted(list(input_dir.rglob("*.yml")) + list(input_dir.rglob("*.yaml")))
 
 
 def repo_from_path(workflow_path: Path, input_dir: Path) -> tuple[str, str]:

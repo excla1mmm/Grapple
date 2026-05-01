@@ -26,7 +26,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 def _required_env(name: str) -> str:
-    value = os.environ.get(name)
+    value = (os.environ.get(name) or "").strip()
     if not value:
         raise RuntimeError(f"Missing required environment variable: {name}")
     return value
@@ -183,11 +183,12 @@ async def process_event(
     actionable = [f for f in findings if f.severity != "safe"]
     if actionable:
         try:
+            full_ref = ref if ref.startswith("refs/") else f"refs/heads/{ref}"
             sarif_id = await client.upload_sarif(
                 owner=owner,
                 repo=repo,
                 commit_sha=head_sha,
-                ref=f"refs/heads/{ref}",
+                ref=full_ref,
                 sarif_gzip_b64=compress_sarif(findings_to_sarif(findings)),
                 token=token,
             )

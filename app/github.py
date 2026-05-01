@@ -296,16 +296,20 @@ class GitHubAppClient:
             return None
         resp.raise_for_status()
 
-        obj = resp.json()["object"]
+        obj = resp.json().get("object")
+        if not obj:
+            return None
 
         # Annotated tags point to a tag object, not a commit.
         # Dereference one level to get the commit SHA.
-        if obj["type"] == "tag":
+        if obj.get("type") == "tag":
             resp = await self._client.get(obj["url"], headers=headers)
             resp.raise_for_status()
-            obj = resp.json()["object"]
+            obj = resp.json().get("object")
+            if not obj:
+                return None
 
-        return obj["sha"]
+        return obj.get("sha")
 
     def verify_webhook_signature(self, payload: bytes, signature: str | None) -> bool:
         """Verify X-Hub-Signature-256 from a GitHub webhook.
