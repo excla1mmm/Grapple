@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse
 from app.analyzer import Finding, analyze_workflow
 from app.check_run import conclusion_for, summary_for, title_for
 from app.github import GitHubAppClient
+from app.sarif import compress_sarif, findings_to_sarif
 from core.classify import get_high_risk_actions
 
 LOGGER = logging.getLogger(__name__)
@@ -178,3 +179,18 @@ async def process_event(
         len(findings),
         conclusion_for(findings),
     )
+
+    actionable = [f for f in findings if f.severity != "safe"]
+    if actionable:
+        try:
+            sarif_id = await client.upload_sarif(
+                owner=owner,
+                repo=repo,
+                commit_sha=head_sha,
+                ref=f"refs/heads/{ref}",
+                sarif_gzip_b64=compress_sarif(findings_to_sarif(findings)),
+                token=token,
+            )
+            LOGGER.info("SARIF uploaded for %s/%s (id=%s)", owner, repo, sarif_id)
+        except Exception:
+            LOGGER.warning("SARIF upload failed for %s/%s (non-fatal)", owner, repo, exc_info=True)
