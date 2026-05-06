@@ -75,17 +75,20 @@ def findings_to_sarif(findings: list[Finding]) -> dict:
         level = _SEVERITY_TO_LEVEL.get(f.severity)
         if level is None:
             continue  # skip "safe" findings
+        physical_location = {
+            "artifactLocation": {
+                "uri": f.workflow_file,
+                "uriBaseId": "%SRCROOT%",
+            },
+        }
+        if f.line_number is not None:
+            physical_location["region"] = {"startLine": f.line_number}
         results.append({
             "ruleId": _rule_id(f),
             "level": level,
             "message": {"text": f.message},
             "locations": [{
-                "physicalLocation": {
-                    "artifactLocation": {
-                        "uri": f.workflow_file,
-                        "uriBaseId": "%SRCROOT%",
-                    },
-                }
+                "physicalLocation": physical_location,
             }],
         })
 

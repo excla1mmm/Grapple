@@ -88,6 +88,15 @@ jobs:
             self.sarif_uploads.append(kwargs)
             return "sarif-id"
 
+        async def resolve_tag_to_sha(self, owner, repo, tag, token):
+            return "1" * 40
+
+        async def resolve_branch_to_sha(self, owner, repo, branch, token):
+            return "2" * 40
+
+        async def get_default_branch(self, owner, repo, token):
+            return "main"
+
     client = FakeClient()
 
     await process_event(client, frozenset(), "pull_request", pr_payload())
@@ -96,4 +105,8 @@ jobs:
     assert client.check_runs[0]["owner"] == "base"
     assert client.check_runs[0]["repo"] == "repo"
     assert client.check_runs[0]["head_sha"] == SHA
+    assert client.check_runs[0]["annotations"][0]["path"] == ".github/workflows/ci.yml"
+    assert client.check_runs[0]["annotations"][0]["annotation_level"] == "warning"
+    assert "## Suggested Fixes" in client.check_runs[0]["summary"]
+    assert f"actions/checkout@{'1' * 40}" in client.check_runs[0]["summary"]
     assert client.sarif_uploads[0]["ref"] == "refs/pull/123/head"

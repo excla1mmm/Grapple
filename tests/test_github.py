@@ -134,3 +134,29 @@ async def test_upload_sarif_returns_id(client):
         token="tok",
     )
     assert sarif_id == "sarif-uuid-123"
+
+
+# --- resolve_branch_to_sha ---
+
+@respx.mock
+async def test_resolve_branch_to_sha_returns_commit_sha(client):
+    respx.get("https://api.github.com/repos/owner/repo/git/ref/heads/main").mock(
+        return_value=httpx.Response(200, json={
+            "object": {"type": "commit", "sha": "a" * 40}
+        })
+    )
+
+    sha = await client.resolve_branch_to_sha("owner", "repo", "main", "tok")
+
+    assert sha == "a" * 40
+
+
+@respx.mock
+async def test_resolve_branch_to_sha_404_returns_none(client):
+    respx.get("https://api.github.com/repos/owner/repo/git/ref/heads/missing").mock(
+        return_value=httpx.Response(404)
+    )
+
+    sha = await client.resolve_branch_to_sha("owner", "repo", "missing", "tok")
+
+    assert sha is None

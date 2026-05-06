@@ -77,6 +77,19 @@ def test_result_contains_workflow_location():
     assert loc["artifactLocation"]["uri"] == ".github/workflows/ci.yml"
 
 
+def test_result_contains_region_start_line_when_available():
+    f = make_finding(line_number=7)
+    sarif = findings_to_sarif([f])
+    loc = sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"]
+    assert loc["region"]["startLine"] == 7
+
+
+def test_result_omits_region_when_line_number_unavailable():
+    sarif = findings_to_sarif([make_finding()])
+    loc = sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"]
+    assert "region" not in loc
+
+
 def test_mixed_findings_only_actionable_included():
     findings = [
         make_finding(severity="critical"),

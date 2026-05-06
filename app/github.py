@@ -311,6 +311,28 @@ class GitHubAppClient:
 
         return obj.get("sha")
 
+    async def resolve_branch_to_sha(
+        self,
+        owner: str,
+        repo: str,
+        branch: str,
+        token: str,
+    ) -> str | None:
+        """Resolve a branch name to its current commit SHA."""
+        headers = {"Authorization": f"token {token}"}
+        resp = await self._client.get(
+            f"/repos/{owner}/{repo}/git/ref/heads/{branch}",
+            headers=headers,
+        )
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+
+        obj = resp.json().get("object")
+        if not obj:
+            return None
+        return obj.get("sha")
+
     def verify_webhook_signature(self, payload: bytes, signature: str | None) -> bool:
         """Verify X-Hub-Signature-256 from a GitHub webhook.
 

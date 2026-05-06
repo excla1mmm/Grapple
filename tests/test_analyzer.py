@@ -161,6 +161,77 @@ def test_high_risk_unpinned_is_critical():
     assert action_findings[0].is_high_risk is True
 
 
+# --- analyze_workflow: line numbers ---
+
+def test_action_finding_has_uses_line_number():
+    text = wf("""
+        permissions: read-all
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v4
+    """)
+    findings = analyze_workflow(text, "ci.yml", HIGH_RISK)
+    action_findings = [f for f in findings if f.kind == "action"]
+    assert action_findings[0].line_number == 6
+
+
+def test_reusable_workflow_finding_has_uses_line_number():
+    text = wf("""
+        permissions: read-all
+        jobs:
+          deploy:
+            uses: org/shared/.github/workflows/deploy.yml@main
+    """)
+    findings = analyze_workflow(text, "ci.yml", HIGH_RISK)
+    reusable_findings = [f for f in findings if f.kind == "reusable_workflow"]
+    assert reusable_findings[0].line_number == 4
+
+
+def test_permission_scope_finding_has_scope_line_number():
+    text = wf("""
+        permissions:
+          id-token: write
+          contents: read
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps: []
+    """)
+    findings = analyze_workflow(text, "ci.yml", HIGH_RISK)
+    perm_findings = [f for f in findings if f.action_name == "permissions.id-token"]
+    assert perm_findings[0].line_number == 2
+
+
+def test_job_permission_write_all_finding_has_header_line_number():
+    text = wf("""
+        permissions: read-all
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            permissions: write-all
+            steps: []
+    """)
+    findings = analyze_workflow(text, "ci.yml", HIGH_RISK)
+    perm_findings = [f for f in findings if f.kind == "permission"]
+    assert perm_findings[0].line_number == 5
+
+
+def test_self_hosted_runner_finding_has_line_number():
+    text = wf("""
+        permissions: read-all
+        jobs:
+          build:
+            runs-on:
+              labels: [self-hosted, linux]
+            steps: []
+    """)
+    findings = analyze_workflow(text, "ci.yml", HIGH_RISK)
+    runner_findings = [f for f in findings if f.kind == "runner"]
+    assert runner_findings[0].line_number == 5
+
+
 # --- analyze_workflow: self-hosted severity bump ---
 
 def test_self_hosted_bumps_tag_to_high():

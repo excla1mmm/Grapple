@@ -12,6 +12,8 @@ Transitive composite analysis is deferred to Phase 3 per CLAUDE.md.
 from __future__ import annotations
 
 import logging
+import re
+from collections import deque
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -51,6 +53,19 @@ _PERMISSION_RISK: dict[str, tuple[Severity, str]] = {
     "statuses": ("medium", "allows creating commit statuses"),
 }
 
+_USES_LINE_PATTERN = re.compile(
+    r"^\s*-?\s*uses:\s*[\"']?(?P<value>[^\"'#\r\n]+?)[\"']?\s*(?:#.*)?$",
+    re.IGNORECASE,
+)
+_PERMISSIONS_HEADER_PATTERN = re.compile(r"^\s*permissions\s*:", re.IGNORECASE)
+_PERMISSION_SCOPE_PATTERN = re.compile(
+    r"^\s*(?P<scope>[a-zA-Z0-9_-]+)\s*:\s*(?P<value>[^#\r\n]+)"
+)
+_SELF_HOSTED_LABEL_PATTERN = re.compile(
+    r"(^|[\[\s:,])self-hosted($|[\],\s#])",
+    re.IGNORECASE,
+)
+
 
 @dataclass(frozen=True)
 class Finding:
@@ -63,6 +78,71 @@ class Finding:
     message: str
     is_high_risk: bool
     is_pinned: bool
+    line_number: int | None = None
+    uses_raw: str = ""
+
+
+class WorkflowLineIndex:
+    """Best-effort line lookup for SARIF regions."""
+
+    def __init__(self, workflow_text: str):
+        self._uses_lines: dict[str, deque[int]] = {}
+        self._permission_headers: deque[int] = deque()
+        self._permission_scope_lines: dict[str, deque[int]] = {}
+        self._self_hosted_lines: deque[int] = deque()
+
+        for line_number, line in enumerate(workflow_text.splitlines(), start=1):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+
+            uses_match = _USES_LINE_PATTERN.match(line)
+            if uses_match:
+                uses_value = uses_match.group("value").strip()
+                self._uses_lines.setdefault(uses_value, deque()).append(line_number)
+
+            if _PERMISSIONS_HEADER_PATTERN.match(line):
+                self._permission_headers.append(line_number)
+
+            scope_match = _PERMISSION_SCOPE_PATTERN.match(line)
+            if (
+                scope_match
+                and _normalize_yaml_scalar(scope_match.group("value")) == "write"
+            ):
+                scope = scope_match.group("scope").lower()
+                self._permission_scope_lines.setdefault(scope, deque()).append(line_number)
+
+            if (
+                _SELF_HOSTED_LABEL_PATTERN.search(stripped)
+                and "uses:" not in stripped.lower()
+            ):
+                self._self_hosted_lines.append(line_number)
+
+    def pop_uses(self, uses_value: str) -> int | None:
+        lines = self._uses_lines.get(uses_value)
+        if not lines:
+            return None
+        return lines.popleft()
+
+    def pop_permission_header(self) -> int | None:
+        if not self._permission_headers:
+            return None
+        return self._permission_headers.popleft()
+
+    def pop_permission_scope(self, scope: str) -> int | None:
+        lines = self._permission_scope_lines.get(scope)
+        if not lines:
+            return None
+        return lines.popleft()
+
+    def pop_self_hosted(self) -> int | None:
+        if not self._self_hosted_lines:
+            return None
+        return self._self_hosted_lines.popleft()
+
+
+def _normalize_yaml_scalar(value: object) -> str:
+    return str(value).strip().strip("'\"").lower()
 
 
 @dataclass(frozen=True)
@@ -206,6 +286,7 @@ def _analyze_permissions(
     perms: Any,
     workflow_path: str,
     job_id: str | None,
+    line_index: WorkflowLineIndex,
 ) -> list[Finding]:
     location = f"job '{job_id}'" if job_id else "workflow level"
     findings: list[Finding] = []
@@ -229,6 +310,8 @@ def _analyze_permissions(
             ))
         return findings
 
+    permissions_line = line_index.pop_permission_header()
+
     if isinstance(perms, str):
         if perms == "write-all":
             findings.append(Finding(
@@ -244,6 +327,7 @@ def _analyze_permissions(
                 ),
                 is_high_risk=False,
                 is_pinned=False,
+                line_number=permissions_line,
             ))
         # `read-all` and unknown shorthand strings: no finding.
         return findings
@@ -251,10 +335,11 @@ def _analyze_permissions(
     if isinstance(perms, dict):
         for scope, value in perms.items():
             scope_s = str(scope).lower()
-            value_s = str(value).lower()
+            value_s = _normalize_yaml_scalar(value)
             if value_s != "write":
                 continue
             severity, why = _PERMISSION_RISK.get(scope_s, ("medium", "grants write access"))
+            line_number = line_index.pop_permission_scope(scope_s) or permissions_line
             findings.append(Finding(
                 kind="permission",
                 workflow_file=workflow_path,
@@ -265,11 +350,16 @@ def _analyze_permissions(
                 message=f"`{scope_s}: write` at {location} — {why}.",
                 is_high_risk=False,
                 is_pinned=False,
+                line_number=line_number,
             ))
     return findings
 
 
-def _runner_finding(workflow_path: str, job: JobInfo) -> Finding:
+def _runner_finding(
+    workflow_path: str,
+    job: JobInfo,
+    line_number: int | None,
+) -> Finding:
     return Finding(
         kind="runner",
         workflow_file=workflow_path,
@@ -284,6 +374,7 @@ def _runner_finding(workflow_path: str, job: JobInfo) -> Finding:
         ),
         is_high_risk=False,
         is_pinned=False,
+        line_number=line_number,
     )
 
 
@@ -294,17 +385,22 @@ def analyze_workflow(
 ) -> list[Finding]:
     """Return all findings from a single workflow file."""
     structure = parse_workflow(workflow_text, workflow_path)
+    line_index = WorkflowLineIndex(workflow_text)
     findings: list[Finding] = list(_analyze_permissions(
-        structure.permissions, workflow_path, job_id=None
+        structure.permissions, workflow_path, job_id=None, line_index=line_index
     ))
 
     for job in structure.jobs:
         findings.extend(_analyze_permissions(
-            job.permissions, workflow_path, job_id=job.job_id
+            job.permissions, workflow_path, job_id=job.job_id, line_index=line_index
         ))
 
         if job.is_self_hosted:
-            findings.append(_runner_finding(workflow_path, job))
+            findings.append(_runner_finding(
+                workflow_path,
+                job,
+                line_number=line_index.pop_self_hosted(),
+            ))
 
         if job.reusable_uses is not None:
             c = classify_uses(job.reusable_uses, high_risk_actions)
@@ -321,6 +417,8 @@ def analyze_workflow(
                 message=_message_for_reusable(c),
                 is_high_risk=bool(c["is_high_risk"]),
                 is_pinned=bool(c["is_pinned"]),
+                line_number=line_index.pop_uses(job.reusable_uses),
+                uses_raw=str(c["uses_raw"]),
             ))
 
         for uses in job.step_uses:
@@ -338,6 +436,8 @@ def analyze_workflow(
                 message=_message_for_action(c),
                 is_high_risk=bool(c["is_high_risk"]),
                 is_pinned=bool(c["is_pinned"]),
+                line_number=line_index.pop_uses(uses),
+                uses_raw=str(c["uses_raw"]),
             ))
 
     return findings

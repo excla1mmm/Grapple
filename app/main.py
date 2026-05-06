@@ -18,7 +18,8 @@ from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from app.analyzer import Finding, analyze_workflow
-from app.check_run import conclusion_for, summary_for, title_for
+from app.check_run import annotations_for, conclusion_for, summary_for, title_for
+from app.fix_plan import build_suggested_fixes
 from app.github import GitHubAppClient
 from app.sarif import compress_sarif, findings_to_sarif
 from core.classify import get_high_risk_actions
@@ -193,6 +194,8 @@ async def process_event(
     for f in files:
         findings.extend(analyze_workflow(f["content"], f["path"], high_risk_actions))
 
+    suggested_fixes = await build_suggested_fixes(client, findings, token)
+
     try:
         check_run_id = await client.create_check_run(
             owner=target.owner,
@@ -200,8 +203,9 @@ async def process_event(
             head_sha=target.head_sha,
             token=token,
             title=title_for(findings),
-            summary=summary_for(findings),
+            summary=summary_for(findings, suggested_fixes=suggested_fixes),
             conclusion=conclusion_for(findings),
+            annotations=annotations_for(findings),
         )
     except Exception:
         LOGGER.exception("Failed to create check run for %s/%s", target.owner, target.repo)
