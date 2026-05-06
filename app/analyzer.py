@@ -118,14 +118,22 @@ def parse_workflow(workflow_text: str, workflow_path: str) -> WorkflowStructure:
     return WorkflowStructure(permissions=doc.get("permissions"), jobs=jobs)
 
 
+def _normalize_runs_on(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [str(x) for x in value]
+    if isinstance(value, dict):
+        runs_on: list[str] = []
+        for key in ("group", "labels"):
+            runs_on.extend(_normalize_runs_on(value.get(key)))
+        return runs_on
+    return []
+
+
 def _parse_job(job_id: str, job_def: dict) -> JobInfo:
     runs_on_raw = job_def.get("runs-on", "")
-    if isinstance(runs_on_raw, str):
-        runs_on = [runs_on_raw]
-    elif isinstance(runs_on_raw, list):
-        runs_on = [str(x) for x in runs_on_raw]
-    else:
-        runs_on = []
+    runs_on = _normalize_runs_on(runs_on_raw)
 
     reusable_uses = None
     job_uses = job_def.get("uses")

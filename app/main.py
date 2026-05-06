@@ -11,6 +11,7 @@ import logging
 import os
 from base64 import b64decode
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import AsyncIterator
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
@@ -60,6 +61,16 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@dataclass(frozen=True)
+class EventTarget:
+    owner: str
+    repo: str
+    content_ref: str
+    sarif_ref: str
+    head_sha: str
+    installation_id: int
+
+
 @app.post("/webhook")
 async def webhook(
     request: Request,
@@ -99,8 +110,8 @@ async def webhook(
 
 def extract_event_target(
     event: str, payload: dict
-) -> tuple[str, str, str, str, int] | None:
-    """Return (owner, repo, ref, head_sha, installation_id) or None if not actionable."""
+) -> EventTarget | None:
+    """Return the repository/commit to scan, or None if not actionable."""
     installation_id = (payload.get("installation") or {}).get("id")
     if not installation_id:
         return None
@@ -113,19 +124,34 @@ def extract_event_target(
     if event == "push":
         head_sha = payload.get("after") or ""
         ref = payload.get("ref") or ""
-        ref_name = ref.removeprefix("refs/heads/") if ref.startswith("refs/heads/") else ref
+        content_ref = (
+            ref.removeprefix("refs/heads/") if ref.startswith("refs/heads/") else ref
+        )
+        sarif_ref = ref
     elif event == "pull_request":
         if payload.get("action") not in ("opened", "synchronize", "reopened"):
             return None
+        pr_number = payload.get("number")
         head = (payload.get("pull_request") or {}).get("head") or {}
         head_sha = head.get("sha") or ""
-        ref_name = head.get("ref") or ""
+        # For fork PRs, head.ref is a branch in the fork, not in the base repo.
+        # The head commit SHA is reachable through the base repository's PR ref
+        # and can be used directly by the contents API.
+        content_ref = head_sha
+        sarif_ref = f"refs/pull/{pr_number}/head" if pr_number else ""
     else:
         return None
 
-    if not (head_sha and ref_name):
+    if not (head_sha and content_ref and sarif_ref):
         return None
-    return owner, name, ref_name, head_sha, installation_id
+    return EventTarget(
+        owner=owner,
+        repo=name,
+        content_ref=content_ref,
+        sarif_ref=sarif_ref,
+        head_sha=head_sha,
+        installation_id=installation_id,
+    )
 
 
 async def process_event(
@@ -143,14 +169,24 @@ async def process_event(
     if target is None:
         LOGGER.info("Skipping %s event — not actionable", event)
         return
-    owner, repo, ref, head_sha, installation_id = target
-    LOGGER.info("Analyzing %s/%s @ %s (event=%s)", owner, repo, head_sha[:8], event)
+    LOGGER.info(
+        "Analyzing %s/%s @ %s (event=%s)",
+        target.owner,
+        target.repo,
+        target.head_sha[:8],
+        event,
+    )
 
     try:
-        token = await client.get_installation_token(installation_id)
-        files = await client.get_workflow_files(owner, repo, ref, token)
+        token = await client.get_installation_token(target.installation_id)
+        files = await client.get_workflow_files(
+            target.owner,
+            target.repo,
+            target.content_ref,
+            token,
+        )
     except Exception:
-        LOGGER.exception("Failed to fetch workflows for %s/%s", owner, repo)
+        LOGGER.exception("Failed to fetch workflows for %s/%s", target.owner, target.repo)
         return
 
     findings: list[Finding] = []
@@ -159,23 +195,23 @@ async def process_event(
 
     try:
         check_run_id = await client.create_check_run(
-            owner=owner,
-            repo=repo,
-            head_sha=head_sha,
+            owner=target.owner,
+            repo=target.repo,
+            head_sha=target.head_sha,
             token=token,
             title=title_for(findings),
             summary=summary_for(findings),
             conclusion=conclusion_for(findings),
         )
     except Exception:
-        LOGGER.exception("Failed to create check run for %s/%s", owner, repo)
+        LOGGER.exception("Failed to create check run for %s/%s", target.owner, target.repo)
         return
 
     LOGGER.info(
         "Check run %d created for %s/%s (%d findings, %s)",
         check_run_id,
-        owner,
-        repo,
+        target.owner,
+        target.repo,
         len(findings),
         conclusion_for(findings),
     )
@@ -183,15 +219,19 @@ async def process_event(
     actionable = [f for f in findings if f.severity != "safe"]
     if actionable:
         try:
-            full_ref = ref if ref.startswith("refs/") else f"refs/heads/{ref}"
             sarif_id = await client.upload_sarif(
-                owner=owner,
-                repo=repo,
-                commit_sha=head_sha,
-                ref=full_ref,
+                owner=target.owner,
+                repo=target.repo,
+                commit_sha=target.head_sha,
+                ref=target.sarif_ref,
                 sarif_gzip_b64=compress_sarif(findings_to_sarif(findings)),
                 token=token,
             )
-            LOGGER.info("SARIF uploaded for %s/%s (id=%s)", owner, repo, sarif_id)
+            LOGGER.info("SARIF uploaded for %s/%s (id=%s)", target.owner, target.repo, sarif_id)
         except Exception:
-            LOGGER.warning("SARIF upload failed for %s/%s (non-fatal)", owner, repo, exc_info=True)
+            LOGGER.warning(
+                "SARIF upload failed for %s/%s (non-fatal)",
+                target.owner,
+                target.repo,
+                exc_info=True,
+            )

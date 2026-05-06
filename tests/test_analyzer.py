@@ -49,6 +49,30 @@ def test_parse_workflow_self_hosted_list():
     assert structure.jobs[0].is_self_hosted
 
 
+def test_parse_workflow_self_hosted_object_labels():
+    structure = parse_workflow(wf("""
+        jobs:
+          build:
+            runs-on:
+              group: ubuntu-runners
+              labels: [self-hosted, linux]
+            steps: []
+    """), "ci.yml")
+    assert structure.jobs[0].is_self_hosted
+    assert "self-hosted" in structure.jobs[0].runs_on
+
+
+def test_parse_workflow_self_hosted_object_label_string():
+    structure = parse_workflow(wf("""
+        jobs:
+          build:
+            runs-on:
+              labels: self-hosted
+            steps: []
+    """), "ci.yml")
+    assert structure.jobs[0].is_self_hosted
+
+
 def test_parse_workflow_reusable():
     structure = parse_workflow(wf("""
         jobs:
@@ -151,6 +175,23 @@ def test_self_hosted_bumps_tag_to_high():
     findings = analyze_workflow(text, "ci.yml", HIGH_RISK)
     action_findings = [f for f in findings if f.kind == "action"]
     assert action_findings[0].severity == "high"
+
+
+def test_self_hosted_object_labels_bumps_tag_to_high():
+    text = wf("""
+        permissions: read-all
+        jobs:
+          build:
+            runs-on:
+              labels: [self-hosted, linux]
+            steps:
+              - uses: actions/checkout@v4
+    """)
+    findings = analyze_workflow(text, "ci.yml", HIGH_RISK)
+    action_findings = [f for f in findings if f.kind == "action"]
+    runner_findings = [f for f in findings if f.kind == "runner"]
+    assert action_findings[0].severity == "high"
+    assert len(runner_findings) == 1
 
 
 def test_self_hosted_bumps_high_to_critical():
